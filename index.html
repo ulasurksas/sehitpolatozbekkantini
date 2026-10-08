@@ -624,7 +624,80 @@ async function viewTeacherForgot(){
   c.appendChild(card);
   return c;
 }
+/* ---------- Öğretmen ödeme özeti ---------- */
+function selTotal(day, sel){
+  return (sel.optionIds || []).reduce((sum, id)=>{
+    const opt = (day.options||[]).find(o=>o.id===id);
+    return sum + (opt ? Number(opt.price)||0 : 0);
+  }, 0);
+}
 
+function buildPaymentSummary(menu, selectionsRaw, teacherId){
+  let unpaid = [], pending = [], confirmedTotal = 0;
+  menu.forEach(day=>{
+    const raw = selectionsRaw[day.id] && selectionsRaw[day.id][teacherId];
+    const sel = normalizeSelection(raw, day.options && day.options[0] && day.options[0].id);
+    if(!sel || !sel.optionIds || sel.optionIds.length === 0) return;
+    const total = selTotal(day, sel);
+    const names = sel.optionIds
+      .map(id => ((day.options||[]).find(o=>o.id===id)||{}).name)
+      .filter(Boolean).join(', ');
+    const item = { day, total, names, rejected: sel.paymentRejected };
+    if(sel.paidConfirmed) confirmedTotal += total;
+    else if(sel.paidByTeacher) pending.push(item);
+    else unpaid.push(item);
+  });
+
+  const unpaidTotal = unpaid.reduce((s,x)=>s+x.total, 0);
+  const pendingTotal = pending.reduce((s,x)=>s+x.total, 0);
+
+  const card = el('div', {class:'panel-card', style:{marginBottom:'22px'}});
+  card.appendChild(el('h2', {text:'Ödeme özeti', style:{fontSize:'19px', marginBottom:'14px'}}));
+
+  const line = (label, value, color, bold)=> el('div', {
+    style:{display:'flex', justifyContent:'space-between', gap:'10px', padding:'6px 0', fontSize:'14.5px', fontWeight: bold ? '700' : '500', color: color || 'var(--ink)'}
+  }, [ el('span', {text:label}), el('span', {text:value}) ]);
+
+  card.appendChild(line('Ödenecek tutar (henüz bildirmediğiniz)', formatPrice(unpaidTotal), unpaidTotal > 0 ? 'var(--danger)' : 'var(--muted)', true));
+  card.appendChild(line('Kantinci onayı bekleyen', formatPrice(pendingTotal), 'var(--muted)'));
+  card.appendChild(line('Onaylanan (ödenmiş)', formatPrice(confirmedTotal), 'var(--success)'));
+
+  if(unpaid.length > 0){
+    card.appendChild(el('div', {text:'Ödemesi bekleyen günler', style:{fontWeight:'700', fontSize:'13.5px', margin:'14px 0 6px 0', paddingTop:'12px', borderTop:'1px solid var(--card-line)'}}));
+    unpaid.forEach(x=>{
+      card.appendChild(el('div', {style:{padding:'7px 10px', background:'var(--cream)', borderRadius:'9px', marginBottom:'6px'}}, [
+        el('div', {style:{display:'flex', justifyContent:'space-between', gap:'10px', fontSize:'14px', fontWeight:'600'}}, [
+          el('span', {text: formatDateTR(x.day.date)}),
+          el('span', {text: formatPrice(x.total)})
+        ]),
+        el('div', {text: x.names + (x.rejected ? '  ·  ⚠ Ödeme onaylanmadı' : ''), style:{fontSize:'12.5px', color: x.rejected ? 'var(--danger)' : 'var(--muted)', marginTop:'2px'}})
+      ]));
+    });
+
+    const bulkBtn = el('button', {class:'btn btn-gold', text:'Tüm borcumu ödedim olarak bildir (' + formatPrice(unpaidTotal) + ')', style:{marginTop:'10px'}});
+    bulkBtn.addEventListener('click', async ()=>{
+      if(!confirm(unpaid.length + ' gün için toplam ' + formatPrice(unpaidTotal) + ' ödemeyi yaptığınızı bildirmek istiyor musunuz? Kantinci onayladığında ödenmiş sayılacak.')) return;
+      const fresh = await getSelections();
+      menu.forEach(day=>{
+        const cur = normalizeSelection(fresh[day.id] && fresh[day.id][teacherId]);
+        if(cur && cur.optionIds.length > 0 && !cur.paidByTeacher && !cur.paidConfirmed){
+          cur.paidByTeacher = true;
+          cur.paymentRejected = false;
+          fresh[day.id][teacherId] = cur;
+        }
+      });
+      await setSelections(fresh);
+      render();
+    });
+    card.appendChild(bulkBtn);
+    card.appendChild(el('div', {class:'hint', text:'Haftalık toplu ödeme yaptıysanız bu butonla tüm günleri tek seferde bildirebilirsiniz. Günleri tek tek bildirmek isterseniz aşağıdaki günlük kartlardaki "Ödeme yaptım" butonunu kullanın.', style:{display:'block'}}));
+  } else if(pending.length === 0 && confirmedTotal === 0){
+    card.appendChild(el('div', {class:'hint', text:'Henüz seçtiğiniz bir gün yok.', style:{display:'block', marginTop:'8px'}}));
+  } else if(unpaid.length === 0){
+    card.appendChild(el('div', {class:'hint', text:'Bildirilmemiş borcunuz yok. 👍', style:{display:'block', marginTop:'8px'}}));
+  }
+  return card;
+}
 /* ---------- VIEW: teacher panel ---------- */
 async function viewTeacherPanel(){
   const c = el('div');
@@ -641,7 +714,7 @@ async function viewTeacherPanel(){
     const sel = normalizeSelection(raw, day.options && day.options[0] && day.options[0].id);
     if(sel && sel.paymentRejected) rejectedDays.push(day);
   });
-
+ c.appendChild(buildPaymentSummary(menu, selectionsRaw, teacherId));
   c.appendChild(el('h2', {text:'Haftalık menü', style:{fontSize:'21px', marginBottom:'4px'}}));
   c.appendChild(el('p', {text:'Katılmak istediğiniz günleri ve seçeneği işaretleyin.', style:{color:'var(--muted)', fontSize:'14px', display:'block', marginBottom:'18px'}}));
 
