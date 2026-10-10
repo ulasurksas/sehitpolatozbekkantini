@@ -217,6 +217,7 @@ let state = {
   expanded: {},
   historyDate: '',
   payPick: null,
+  xl: { mode:'weekly', from:'', to:'' },
   loading: true,
 };
 
@@ -1044,6 +1045,403 @@ async function viewCanteenSettings(){
   return c;
 }
 
+/* ---------- EXCEL RAPORU ---------- */
+function dateToStr(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function strToDate(s){ const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); }
+function addDaysStr(s, n){ const d = strToDate(s); d.setDate(d.getDate()+n); return dateToStr(d); }
+function mondayOf(s){ const d = strToDate(s); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return dateToStr(d); }
+function shortDM(s){ const [, m, d] = s.split('-'); return d + '.' + m; }
+
+const XL_STATUS = {
+  paid:     { label:'Ödendi',        fill:'FFC6EFCE', font:'FF006100', tint:'FFEAF6EC' },
+  pending:  { label:'Onay bekliyor', fill:'FFFFEB9C', font:'FF9C5700', tint:'FFFFF8E1' },
+  rejected: { label:'Reddedildi',    fill:'FFF8CBAD', font:'FF9C2B00', tint:'FFFDEBDD' },
+  unpaid:   { label:'Ödemedi',       fill:'FFFFC7CE', font:'FF9C0006', tint:'FFFDECEC' }
+};
+const XL_COLS = [{width:28},{width:20},{width:34},{width:16},{width:18},{width:18},{width:18}];
+const XL_MONEY = '#,##0.00" ₺"';
+const XL_LINE = { style:'thin', color:{argb:'FFBFB8A5'} };
+const XL_BORDER = { top:XL_LINE, left:XL_LINE, bottom:XL_LINE, right:XL_LINE };
+function xlFill(argb){ return { type:'pattern', pattern:'solid', fgColor:{argb} }; }
+
+function xlStatusOf(sel){
+  if(sel.paidConfirmed) return 'paid';
+  if(sel.paidByTeacher) return 'pending';
+  if(sel.paymentRejected) return 'rejected';
+  return 'unpaid';
+}
+function xlTitle(ws, text, size){
+  ws.mergeCells(1,1,1,7);
+  const c = ws.getCell(1,1);
+  c.value = text;
+  c.font = { bold:true, size:size||15, color:{argb:'FFFFFFFF'} };
+  c.fill = xlFill('FF28362C');
+  c.alignment = { vertical:'middle', horizontal:'left', indent:1 };
+  ws.getRow(1).height = 32;
+}
+function xlNote(ws, rowNum, text){
+  ws.mergeCells(rowNum,1,rowNum,7);
+  const c = ws.getCell(rowNum,1);
+  c.value = text;
+  c.font = { color:{argb:'FF726F60'}, size:11 };
+  c.alignment = { vertical:'middle', wrapText:true };
+}
+function xlSection(ws, rowNum, text){
+  ws.mergeCells(rowNum,1,rowNum,7);
+  const c = ws.getCell(rowNum,1);
+  c.value = text;
+  c.font = { bold:true, size:13, color:{argb:'FF28362C'} };
+  c.fill = xlFill('FFF2EAD9');
+  c.alignment = { vertical:'middle', indent:1 };
+  ws.getRow(rowNum).height = 24;
+}
+function xlHeader(ws, rowNum, labels){
+  const row = ws.getRow(rowNum);
+  labels.forEach((l,i)=>{
+    const c = row.getCell(i+1);
+    c.value = l;
+    c.font = { bold:true, color:{argb:'FFFFFFFF'} };
+    c.fill = xlFill('FF3F5A47');
+    c.alignment = { vertical:'middle', horizontal:'center', wrapText:true };
+    c.border = XL_BORDER;
+  });
+  row.height = 24;
+}
+function xlBorders(row, n){ for(let i=1;i<=n;i++){ row.getCell(i).border = XL_BORDER; } }
+function xlColor(cell, status){
+  const s = XL_STATUS[status];
+  cell.fill = xlFill(s.fill);
+  cell.font = { bold:true, color:{argb:s.font} };
+  cell.alignment = { horizontal:'center', vertical:'middle', wrapText:true };
+}
+function xlTotalRow(row, n){
+  for(let i=1;i<=n;i++){
+    const c = row.getCell(i);
+    c.font = { bold:true };
+    c.fill = xlFill('FFF2EAD9');
+    c.border = XL_BORDER;
+  }
+}
+
+// Ürün bazında toplam tablosu
+function xlProductTable(ws, r, rows){
+  xlHeader(ws, r, ['Ürün','Adet','Birim fiyat','Toplam tutar']);
+  const map = {};
+  rows.forEach(x=> x.opts.forEach(o=>{
+    const k = o.name + '|' + o.price;
+    if(!map[k]) map[k] = { name:o.name, price:o.price, count:0 };
+    map[k].count++;
+  }));
+  const list = Object.values(map).sort((a,b)=> a.name.localeCompare(b.name,'tr'));
+  let sumCount = 0, sumAmount = 0;
+  list.forEach((p,i)=>{
+    const row = ws.getRow(r+1+i);
+    row.getCell(1).value = p.name;
+    row.getCell(2).value = p.count;
+    row.getCell(3).value = p.price;  row.getCell(3).numFmt = XL_MONEY;
+    row.getCell(4).value = p.count * p.price;  row.getCell(4).numFmt = XL_MONEY;
+    row.getCell(2).alignment = { horizontal:'center' };
+    xlBorders(row, 4);
+    sumCount += p.count; sumAmount += p.count * p.price;
+  });
+  const tr = ws.getRow(r+1+list.length);
+  tr.getCell(1).value = 'TOPLAM';
+  tr.getCell(2).value = sumCount;  tr.getCell(2).alignment = { horizontal:'center' };
+  tr.getCell(4).value = sumAmount; tr.getCell(4).numFmt = XL_MONEY;
+  xlTotalRow(tr, 4);
+  return r + list.length + 3;
+}
+
+// Öğretmen bazlı özet (ödeyen / ödemeyen)
+function xlTeacherTable(ws, r, rows){
+  xlHeader(ws, r, ['Öğretmen','Sipariş günü','Toplam tutar','Ödenen','Onay bekleyen','Ödenmeyen','Durum']);
+  const map = {};
+  rows.forEach(x=>{
+    const t = map[x.teacherId] || (map[x.teacherId] = { name:x.teacher, days:0, total:0, paid:0, pending:0, unpaid:0 });
+    t.days++; t.total += x.total;
+    if(x.status === 'paid') t.paid += x.total;
+    else if(x.status === 'pending') t.pending += x.total;
+    else t.unpaid += x.total;
+  });
+  const list = Object.values(map).sort((a,b)=> a.name.localeCompare(b.name,'tr'));
+  const sum = { days:0, total:0, paid:0, pending:0, unpaid:0 };
+  const labels = { paid:'Tamamı ödendi', pending:'Onay bekliyor', unpaid:'Borcu var' };
+  list.forEach((t,i)=>{
+    const row = ws.getRow(r+1+i);
+    row.getCell(1).value = t.name;
+    row.getCell(2).value = t.days;   row.getCell(2).alignment = { horizontal:'center' };
+    row.getCell(3).value = t.total;
+    row.getCell(4).value = t.paid;
+    row.getCell(5).value = t.pending;
+    row.getCell(6).value = t.unpaid;
+    for(let k=3;k<=6;k++) row.getCell(k).numFmt = XL_MONEY;
+    xlBorders(row, 7);
+    if(t.paid > 0) xlColor(row.getCell(4), 'paid');
+    if(t.pending > 0) xlColor(row.getCell(5), 'pending');
+    if(t.unpaid > 0) xlColor(row.getCell(6), 'unpaid');
+    const st = t.unpaid > 0 ? 'unpaid' : (t.pending > 0 ? 'pending' : 'paid');
+    row.getCell(7).value = labels[st];
+    xlColor(row.getCell(7), st);
+    row.getCell(7).border = XL_BORDER;
+    ['days','total','paid','pending','unpaid'].forEach(k=> sum[k] += t[k]);
+  });
+  const tr = ws.getRow(r+1+list.length);
+  tr.getCell(1).value = 'TOPLAM';
+  tr.getCell(2).value = sum.days;  tr.getCell(2).alignment = { horizontal:'center' };
+  tr.getCell(3).value = sum.total;
+  tr.getCell(4).value = sum.paid;
+  tr.getCell(5).value = sum.pending;
+  tr.getCell(6).value = sum.unpaid;
+  for(let k=3;k<=6;k++) tr.getCell(k).numFmt = XL_MONEY;
+  xlTotalRow(tr, 7);
+  return r + list.length + 3;
+}
+
+// Sipariş detay tablosu (satır satır, durum renkli)
+function xlDetailTable(ws, r, rows){
+  xlHeader(ws, r, ['Öğretmen','Tarih','Seçilen ürünler','Tutar','Durum','Ödeme yöntemi']);
+  let sum = 0;
+  rows.forEach((x,i)=>{
+    const row = ws.getRow(r+1+i);
+    row.getCell(1).value = x.teacher;
+    row.getCell(2).value = formatDateTR(x.date);
+    row.getCell(3).value = x.items;
+    row.getCell(4).value = x.total;  row.getCell(4).numFmt = XL_MONEY;
+    row.getCell(5).value = XL_STATUS[x.status].label;
+    row.getCell(6).value = x.method || ((x.status === 'paid' || x.status === 'pending') ? 'Belirtilmedi' : '—');
+    xlBorders(row, 6);
+    for(let k=1;k<=4;k++) row.getCell(k).fill = xlFill(XL_STATUS[x.status].tint);
+    row.getCell(3).alignment = { wrapText:true, vertical:'middle' };
+    row.getCell(6).alignment = { horizontal:'center' };
+    xlColor(row.getCell(5), x.status);
+    row.getCell(5).border = XL_BORDER;
+    sum += x.total;
+  });
+  const tr = ws.getRow(r+1+rows.length);
+  tr.getCell(1).value = 'TOPLAM';
+  tr.getCell(4).value = sum;  tr.getCell(4).numFmt = XL_MONEY;
+  xlTotalRow(tr, 6);
+  return r + rows.length + 3;
+}
+
+// Her gün / hafta için ayrı sayfa
+function xlPeriodSheet(wb, name, title, subtitle, pRows, weekly){
+  let uniq = name, n = 2;
+  while(wb.getWorksheet(uniq)) uniq = name.slice(0,27) + ' ' + (n++);
+  const ws = wb.addWorksheet(uniq, { views:[{ showGridLines:false }] });
+  ws.columns = XL_COLS.map(c=>({...c}));
+  xlTitle(ws, title, 14);
+  xlNote(ws, 2, subtitle);
+  let r = 4;
+  xlSection(ws, r, 'Ürün bazında toplam');
+  r = xlProductTable(ws, r+1, pRows);
+  if(weekly){
+    xlSection(ws, r, 'Öğretmen özeti');
+    r = xlTeacherTable(ws, r+1, pRows);
+  }
+  xlSection(ws, r, 'Sipariş detayı');
+  xlDetailTable(ws, r+1, pRows);
+}
+
+async function exportExcel(mode, from, to){
+  if(!from || !to) throw new Error('Başlangıç ve bitiş tarihini seçin.');
+  if(from > to) throw new Error('Başlangıç tarihi bitiş tarihinden sonra olamaz.');
+  if(typeof ExcelJS === 'undefined') throw new Error('Excel kütüphanesi yüklenemedi. İnternet bağlantınızı kontrol edip sayfayı yenileyin.');
+
+  const menu = await getMenu();
+  const selections = await getSelections();
+  const teachers = await getTeachers();
+  const teacherMap = {}; teachers.forEach(t=> teacherMap[t.id] = t.name);
+
+  const rows = [];
+  menu.filter(d=> d.date >= from && d.date <= to).forEach(day=>{
+    const daySel = selections[day.id] || {};
+    Object.keys(daySel).forEach(tid=>{
+      const sel = normalizeSelection(daySel[tid], day.options && day.options[0] && day.options[0].id);
+      if(!sel || !sel.optionIds || sel.optionIds.length === 0) return;
+      const opts = sel.optionIds.map(id => (day.options||[]).find(o=>o.id===id)).filter(Boolean)
+        .map(o => ({ name:o.name, price:Number(o.price)||0 }));
+      rows.push({
+        date: day.date, dayOptions: day.options || [],
+        teacherId: tid, teacher: teacherMap[tid] || 'Bilinmeyen öğretmen',
+        items: opts.map(o=>o.name).join(' + '), opts,
+        total: opts.reduce((s,o)=> s + o.price, 0),
+        status: xlStatusOf(sel),
+        method: sel.paymentMethod ? payMethodLabel(sel.paymentMethod) : ''
+      });
+    });
+  });
+  rows.sort((a,b)=> a.date.localeCompare(b.date) || a.teacher.localeCompare(b.teacher,'tr'));
+  if(rows.length === 0) throw new Error('Seçilen tarih aralığında sipariş bulunamadı.');
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = SCHOOL_NAME;
+  wb.created = new Date();
+
+  /* ----- Özet sayfası ----- */
+  const ws = wb.addWorksheet('Özet', { properties:{ tabColor:{argb:'FFC99A3D'} }, views:[{ showGridLines:false }] });
+  ws.columns = XL_COLS.map(c=>({...c}));
+  xlTitle(ws, SCHOOL_NAME + ' — Kantin Raporu', 16);
+  xlNote(ws, 2, (mode === 'daily' ? 'Günlük rapor' : 'Haftalık rapor') + '   |   Tarih aralığı: ' + formatDateTR(from) + '  –  ' + formatDateTR(to));
+  xlNote(ws, 3, 'Oluşturulma: ' + new Date().toLocaleString('tr-TR'));
+
+  const total = rows.reduce((s,x)=> s + x.total, 0);
+  const by = { paid:0, pending:0, unpaid:0 };
+  rows.forEach(x=>{
+    if(x.status === 'paid') by.paid += x.total;
+    else if(x.status === 'pending') by.pending += x.total;
+    else by.unpaid += x.total;
+  });
+
+  let r = 5;
+  xlSection(ws, r, 'Genel durum'); r++;
+  const kpis = [
+    ['Toplam sipariş (öğretmen-gün)', rows.length, null, false],
+    ['Toplam tutar', total, null, true],
+    ['Ödenen (kantinci onaylı)', by.paid, 'paid', true],
+    ['Onay bekleyen', by.pending, 'pending', true],
+    ['Ödenmeyen (reddedilen dahil)', by.unpaid, 'unpaid', true]
+  ];
+  kpis.forEach(([label, val, st, money])=>{
+    const row = ws.getRow(r++);
+    row.getCell(1).value = label;
+    row.getCell(1).font = { bold:true };
+    row.getCell(2).value = val;
+    if(money) row.getCell(2).numFmt = XL_MONEY;
+    row.getCell(2).alignment = { horizontal:'center' };
+    xlBorders(row, 2);
+    if(st) xlColor(row.getCell(2), st);
+  });
+  const rateRow = ws.getRow(r++);
+  rateRow.getCell(1).value = 'Tahsilat oranı (onaylı)';
+  rateRow.getCell(1).font = { bold:true };
+  rateRow.getCell(2).value = total > 0 ? by.paid / total : 0;
+  rateRow.getCell(2).numFmt = '0%';
+  rateRow.getCell(2).alignment = { horizontal:'center' };
+  xlBorders(rateRow, 2);
+  r++;
+
+  // Ödeme yöntemi dağılımı (ödendi + onay bekleyenler)
+  const methodMap = {};
+  rows.filter(x=> x.status === 'paid' || x.status === 'pending').forEach(x=>{
+    const k = x.method || 'Belirtilmedi';
+    if(!methodMap[k]) methodMap[k] = { count:0, amount:0 };
+    methodMap[k].count++; methodMap[k].amount += x.total;
+  });
+  const methodKeys = Object.keys(methodMap);
+  if(methodKeys.length > 0){
+    xlSection(ws, r, 'Ödeme yöntemi dağılımı (bildirilen ödemeler)'); r++;
+    xlHeader(ws, r, ['Yöntem','Adet','Tutar']); r++;
+    methodKeys.forEach(k=>{
+      const row = ws.getRow(r++);
+      row.getCell(1).value = k;
+      row.getCell(2).value = methodMap[k].count;  row.getCell(2).alignment = { horizontal:'center' };
+      row.getCell(3).value = methodMap[k].amount; row.getCell(3).numFmt = XL_MONEY;
+      xlBorders(row, 3);
+    });
+    r++;
+  }
+
+  xlSection(ws, r, 'Ürün bazında toplam'); r++;
+  r = xlProductTable(ws, r, rows);
+  xlSection(ws, r, 'Öğretmen bazlı ödeme durumu'); r++;
+  r = xlTeacherTable(ws, r, rows);
+
+  // Renk açıklaması
+  xlSection(ws, r, 'Renk açıklaması'); r++;
+  ['paid','pending','rejected','unpaid'].forEach(st=>{
+    const row = ws.getRow(r++);
+    row.getCell(1).value = XL_STATUS[st].label;
+    xlColor(row.getCell(1), st);
+    row.getCell(1).border = XL_BORDER;
+    row.getCell(2).value = { paid:'Kantinci ödemeyi onayladı', pending:'Öğretmen ödedim dedi, kantinci henüz onaylamadı', rejected:'Kantinci ödemeyi onaylamadı', unpaid:'Henüz ödeme bildirilmedi' }[st];
+    ws.mergeCells(row.number, 2, row.number, 5);
+  });
+
+  /* ----- Gün / hafta sayfaları ----- */
+  if(mode === 'daily'){
+    const dates = [...new Set(rows.map(x=>x.date))];
+    dates.forEach(d=>{
+      const pRows = rows.filter(x=> x.date === d);
+      const dt = strToDate(d);
+      const name = shortDM(d) + ' ' + DAYS_TR[dt.getDay()];
+      const menuLine = 'Menü: ' + pRows[0].dayOptions.map(o=> o.name + ' (' + formatPrice(o.price) + ')').join('  •  ');
+      xlPeriodSheet(wb, name, formatDateTR(d), menuLine, pRows, false);
+    });
+  } else {
+    let wk = mondayOf(from), idx = 1;
+    while(wk <= to){
+      const a = wk < from ? from : wk;
+      const wkEnd = addDaysStr(wk, 6);
+      const b = wkEnd > to ? to : wkEnd;
+      const pRows = rows.filter(x=> x.date >= a && x.date <= b);
+      if(pRows.length > 0){
+        xlPeriodSheet(wb, 'Hafta ' + idx + ' (' + shortDM(a) + '-' + shortDM(b) + ')',
+          idx + '. Hafta', formatDateTR(a) + '  –  ' + formatDateTR(b), pRows, true);
+      }
+      wk = addDaysStr(wk, 7); idx++;
+    }
+  }
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'Kantin_' + (mode === 'daily' ? 'Gunluk' : 'Haftalik') + '_Rapor_' + from + '_' + to + '.xlsx';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=> URL.revokeObjectURL(url), 5000);
+}
+
+// Kantinci panelindeki "Excel raporu" kartı
+function buildExcelCard(){
+  const x = state.xl;
+  if(!x.from || !x.to){
+    const mon = mondayOf(todayStr());
+    x.from = mon; x.to = addDaysStr(mon, 6);
+  }
+  const card = el('div', {class:'panel-card', style:{marginBottom:'20px'}});
+  card.appendChild(el('div', {text:'📊 Excel raporu', style:{fontWeight:'700', fontSize:'15px'}}));
+  card.appendChild(el('div', {class:'hint', text:'Seçtiğiniz tarih aralığı için ödeme durumları renkli bir Excel dosyası olarak indirilir. Günlük: her gün ayrı sayfa. Haftalık: her hafta ayrı sayfa.', style:{display:'block', marginBottom:'12px'}}));
+
+  const modeRow = el('div', {style:{display:'flex', gap:'8px', marginBottom:'12px'}});
+  [['daily','Günlük'],['weekly','Haftalık']].forEach(([id,label])=>{
+    modeRow.appendChild(el('button', {class:'btn btn-sm ' + (x.mode === id ? 'btn-dark' : 'btn-outline'), text:label, on:{click:()=>{ x.mode = id; render(); }}}));
+  });
+  card.appendChild(modeRow);
+
+  const presetRow = el('div', {style:{display:'flex', gap:'8px', flexWrap:'wrap', marginBottom:'12px'}});
+  const setRange = (f,t)=>{ x.from = f; x.to = t; render(); };
+  const mon = mondayOf(todayStr());
+  presetRow.appendChild(el('button', {class:'btn btn-outline btn-sm', text:'Bugün', on:{click:()=> setRange(todayStr(), todayStr())}}));
+  presetRow.appendChild(el('button', {class:'btn btn-outline btn-sm', text:'Bu hafta', on:{click:()=> setRange(mon, addDaysStr(mon,6))}}));
+  presetRow.appendChild(el('button', {class:'btn btn-outline btn-sm', text:'Geçen hafta', on:{click:()=> setRange(addDaysStr(mon,-7), addDaysStr(mon,-1))}}));
+  card.appendChild(presetRow);
+
+  const fromInput = el('input', {attrs:{type:'date'}});
+  fromInput.value = x.from;
+  fromInput.addEventListener('change', ()=>{ x.from = fromInput.value; });
+  const toInput = el('input', {attrs:{type:'date'}});
+  toInput.value = x.to;
+  toInput.addEventListener('change', ()=>{ x.to = toInput.value; });
+  const f1 = el('div', {class:'field', style:{marginBottom:'0'}}, [ el('label', {text: x.mode === 'daily' ? 'İlk gün' : 'Başlangıç'}), fromInput ]);
+  const f2 = el('div', {class:'field', style:{marginBottom:'0'}}, [ el('label', {text: x.mode === 'daily' ? 'Son gün' : 'Bitiş'}), toInput ]);
+  card.appendChild(el('div', {class:'row', style:{marginBottom:'14px'}}, [f1, f2]));
+
+  const btn = el('button', {class:'btn btn-gold', text:'⬇ Excel olarak indir'});
+  btn.addEventListener('click', async ()=>{
+    x.from = fromInput.value; x.to = toInput.value;
+    btn.disabled = true; btn.textContent = 'Hazırlanıyor...';
+    try{ await exportExcel(x.mode, x.from, x.to); }
+    catch(e){ console.error(e); alert(e.message || 'Excel oluşturulurken bir hata oluştu.'); }
+    btn.disabled = false; btn.textContent = '⬇ Excel olarak indir';
+  });
+  card.appendChild(btn);
+  return card;
+}
+
 /* ---------- VIEW: canteen panel ---------- */
 async function viewCanteenPanel(){
   const c = el('div');
@@ -1075,6 +1473,7 @@ async function viewCanteenPanel(){
   });
   orderToggleCard.appendChild(orderToggleBtn);
   c.appendChild(orderToggleCard);
+  c.appendChild(buildExcelCard());
 
   c.appendChild(el('div', {class:'section-title'}, [
     el('h2', {text:'Haftalık menü'}),
