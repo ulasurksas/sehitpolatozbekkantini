@@ -177,6 +177,32 @@ const LOGO_B64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw
 const MONTHS_TR = ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'];
 const DAYS_TR = ['Pazar','Pazartesi','Salı','Çarşamba','Perşembe','Cuma','Cumartesi'];
 
+/* ---------- ödeme yöntemleri ---------- */
+const PAY_METHODS = [
+  { id:'nakit', label:'Nakit' },
+  { id:'iban',  label:'IBAN / Havale' },
+  { id:'kart',  label:'Kredi kartı' }
+];
+function payMethodLabel(id){
+  const m = PAY_METHODS.find(x=>x.id===id);
+  return m ? m.label : '';
+}
+function payMethodSuffix(sel){
+  return sel && sel.paymentMethod ? ' · ' + payMethodLabel(sel.paymentMethod) : '';
+}
+// "Nasıl ödediniz?" seçici — yöntem seçilince onPick(methodId) çağrılır
+function buildMethodPicker(onPick, onCancel){
+  const wrap = el('div', {style:{width:'100%'}});
+  wrap.appendChild(el('div', {text:'Nasıl ödediniz?', style:{fontWeight:'700', fontSize:'13.5px', marginBottom:'8px'}}));
+  const row = el('div', {style:{display:'flex', gap:'8px', flexWrap:'wrap'}});
+  PAY_METHODS.forEach(m=>{
+    row.appendChild(el('button', {class:'btn btn-gold btn-sm', text:m.label, on:{click:()=>onPick(m.id)}}));
+  });
+  row.appendChild(el('button', {class:'btn btn-outline btn-sm', text:'Vazgeç', on:{click:onCancel}}));
+  wrap.appendChild(row);
+  return wrap;
+}
+
 /* ---------- state ---------- */
 let state = {
   view: 'home',
@@ -190,6 +216,7 @@ let state = {
   modal: null,
   expanded: {},
   historyDate: '',
+  payPick: null,
   loading: true,
 };
 
@@ -232,6 +259,7 @@ function replaceNav(){ try{ history.replaceState(navSnapshot(), '', ''); }catch(
 
 function goto(view, opts={}){
   clearMsgs();
+  state.payPick = null;
   if(opts.resetHistory){
     state.history = [];
   } else if(state.view !== view){
@@ -250,6 +278,7 @@ function goBack(){
 }
 window.addEventListener('popstate', (e)=>{
   clearMsgs();
+  state.payPick = null;
   const s = e.state;
   if(s){
     state.view = s.view || 'home';
@@ -340,10 +369,10 @@ function seedMenu(){
   ];
 }
 // Bir seçimi normalize eder: eski formatta (true veya tekil optionId) kaydedilmiş
-// seçimleri yeni { optionIds: [], paidByTeacher, paidConfirmed, paymentRejected } formatına çevirir.
+// seçimleri yeni { optionIds: [], paidByTeacher, paidConfirmed, paymentRejected, paymentMethod } formatına çevirir.
 function normalizeSelection(sel, fallbackOptionId){
   if(sel === true){
-    return { optionIds: fallbackOptionId ? [fallbackOptionId] : [], paidByTeacher:false, paidConfirmed:false, paymentRejected:false };
+    return { optionIds: fallbackOptionId ? [fallbackOptionId] : [], paidByTeacher:false, paidConfirmed:false, paymentRejected:false, paymentMethod:null };
   }
   if(sel && typeof sel === 'object'){
     let optionIds;
@@ -354,7 +383,8 @@ function normalizeSelection(sel, fallbackOptionId){
       optionIds,
       paidByTeacher: !!sel.paidByTeacher,
       paidConfirmed: !!sel.paidConfirmed,
-      paymentRejected: !!sel.paymentRejected
+      paymentRejected: !!sel.paymentRejected,
+      paymentMethod: sel.paymentMethod || null
     };
   }
   return null;
@@ -674,22 +704,30 @@ function buildPaymentSummary(menu, selectionsRaw, teacherId){
       ]));
     });
 
-    const bulkBtn = el('button', {class:'btn btn-gold', text:'Tüm borcumu ödedim olarak bildir (' + formatPrice(unpaidTotal) + ')', style:{marginTop:'10px'}});
-    bulkBtn.addEventListener('click', async ()=>{
-      if(!confirm(unpaid.length + ' gün için toplam ' + formatPrice(unpaidTotal) + ' ödemeyi yaptığınızı bildirmek istiyor musunuz? Kantinci onayladığında ödenmiş sayılacak.')) return;
-      const fresh = await getSelections();
-      menu.forEach(day=>{
-        const cur = normalizeSelection(fresh[day.id] && fresh[day.id][teacherId]);
-        if(cur && cur.optionIds.length > 0 && !cur.paidByTeacher && !cur.paidConfirmed){
-          cur.paidByTeacher = true;
-          cur.paymentRejected = false;
-          fresh[day.id][teacherId] = cur;
-        }
-      });
-      await setSelections(fresh);
-      render();
-    });
-    card.appendChild(bulkBtn);
+    if(state.payPick === 'bulk'){
+      const picker = buildMethodPicker(async (methodId)=>{
+        if(!confirm(unpaid.length + ' gün için toplam ' + formatPrice(unpaidTotal) + ' ödemeyi (' + payMethodLabel(methodId) + ') yaptığınızı bildirmek istiyor musunuz? Kantinci onayladığında ödenmiş sayılacak.')) return;
+        const fresh = await getSelections();
+        menu.forEach(day=>{
+          const cur = normalizeSelection(fresh[day.id] && fresh[day.id][teacherId]);
+          if(cur && cur.optionIds.length > 0 && !cur.paidByTeacher && !cur.paidConfirmed){
+            cur.paidByTeacher = true;
+            cur.paymentRejected = false;
+            cur.paymentMethod = methodId;
+            fresh[day.id][teacherId] = cur;
+          }
+        });
+        await setSelections(fresh);
+        state.payPick = null;
+        render();
+      }, ()=>{ state.payPick = null; render(); });
+      picker.style.marginTop = '10px';
+      card.appendChild(picker);
+    } else {
+      const bulkBtn = el('button', {class:'btn btn-gold', text:'Tüm borcumu ödedim olarak bildir (' + formatPrice(unpaidTotal) + ')', style:{marginTop:'10px'}});
+      bulkBtn.addEventListener('click', ()=>{ state.payPick = 'bulk'; render(); });
+      card.appendChild(bulkBtn);
+    }
     card.appendChild(el('div', {class:'hint', text:'Haftalık toplu ödeme yaptıysanız bu butonla tüm günleri tek seferde bildirebilirsiniz. Günleri tek tek bildirmek isterseniz aşağıdaki günlük kartlardaki "Ödeme yaptım" butonunu kullanın.', style:{display:'block'}}));
   } else if(pending.length === 0 && confirmedTotal === 0){
     card.appendChild(el('div', {class:'hint', text:'Henüz seçtiğiniz bir gün yok.', style:{display:'block', marginTop:'8px'}}));
@@ -769,7 +807,7 @@ async function viewTeacherPanel(){
         const fresh = await getSelections();
         if(!fresh[day.id]) fresh[day.id] = {};
         const curRaw = fresh[day.id][teacherId];
-        const cur = normalizeSelection(curRaw) || { optionIds:[], paidByTeacher:false, paidConfirmed:false, paymentRejected:false };
+        const cur = normalizeSelection(curRaw) || { optionIds:[], paidByTeacher:false, paidConfirmed:false, paymentRejected:false, paymentMethod:null };
         const idx = cur.optionIds.indexOf(opt.id);
         if(idx > -1) cur.optionIds.splice(idx, 1);
         else cur.optionIds.push(opt.id);
@@ -792,28 +830,49 @@ async function viewTeacherPanel(){
       }, 0);
       card.appendChild(el('div', {text:'Toplam: ' + formatPrice(total), style:{fontWeight:'700', color:'var(--gold-dark)', fontSize:'14.5px', marginBottom:'10px'}}));
 
-      const payWrap = el('div', {style:{display:'flex', alignItems:'center', gap:'10px', paddingTop:'8px', borderTop:'1px solid var(--card-line)'}});
-      const payBtn = el('button', {
-        class:'btn btn-sm ' + (sel.paidByTeacher ? 'btn-dark' : 'btn-outline'),
-        text: sel.paidByTeacher ? '✓ Ödeme bildirildi' : 'Ödeme yaptım',
-        style:{width:'auto'}
-      });
-      payBtn.addEventListener('click', async ()=>{
-        const fresh = await getSelections();
-        const cur = normalizeSelection(fresh[day.id] && fresh[day.id][teacherId]);
-        if(!cur) return;
-        cur.paidByTeacher = !cur.paidByTeacher;
-        cur.paymentRejected = false;
-        if(!cur.paidByTeacher) cur.paidConfirmed = false;
-        fresh[day.id][teacherId] = cur;
-        await setSelections(fresh);
-        render();
-      });
-      payWrap.appendChild(payBtn);
-      if(sel.paidConfirmed){
-        payWrap.appendChild(el('span', {text:'✓ Kantinci onayladı', style:{fontSize:'12.5px', color:'var(--success)', fontWeight:'600'}}));
-      } else if(sel.paidByTeacher){
-        payWrap.appendChild(el('span', {text:'Onay bekleniyor', style:{fontSize:'12.5px', color:'var(--muted)'}}));
+      const payWrap = el('div', {style:{display:'flex', alignItems:'center', flexWrap:'wrap', gap:'10px', paddingTop:'8px', borderTop:'1px solid var(--card-line)'}});
+      if(sel.paidByTeacher){
+        // Ödeme bildirildi: tekrar basınca bildirim geri alınır
+        const cancelBtn = el('button', {class:'btn btn-sm btn-dark', text:'✓ Ödeme bildirildi', style:{width:'auto'}});
+        cancelBtn.addEventListener('click', async ()=>{
+          const fresh = await getSelections();
+          const cur = normalizeSelection(fresh[day.id] && fresh[day.id][teacherId]);
+          if(!cur) return;
+          cur.paidByTeacher = false;
+          cur.paidConfirmed = false;
+          cur.paymentRejected = false;
+          cur.paymentMethod = null;
+          fresh[day.id][teacherId] = cur;
+          await setSelections(fresh);
+          render();
+        });
+        payWrap.appendChild(cancelBtn);
+        if(sel.paymentMethod){
+          payWrap.appendChild(el('span', {text: payMethodLabel(sel.paymentMethod), style:{fontSize:'12.5px', fontWeight:'600', background:'var(--cream)', padding:'4px 10px', borderRadius:'8px'}}));
+        }
+        if(sel.paidConfirmed){
+          payWrap.appendChild(el('span', {text:'✓ Kantinci onayladı', style:{fontSize:'12.5px', color:'var(--success)', fontWeight:'600'}}));
+        } else {
+          payWrap.appendChild(el('span', {text:'Onay bekleniyor', style:{fontSize:'12.5px', color:'var(--muted)'}}));
+        }
+      } else if(state.payPick === day.id){
+        // Ödeme yöntemi seçimi
+        payWrap.appendChild(buildMethodPicker(async (methodId)=>{
+          const fresh = await getSelections();
+          const cur = normalizeSelection(fresh[day.id] && fresh[day.id][teacherId]);
+          if(!cur) return;
+          cur.paidByTeacher = true;
+          cur.paymentRejected = false;
+          cur.paymentMethod = methodId;
+          fresh[day.id][teacherId] = cur;
+          await setSelections(fresh);
+          state.payPick = null;
+          render();
+        }, ()=>{ state.payPick = null; render(); }));
+      } else {
+        const payBtn = el('button', {class:'btn btn-sm btn-outline', text:'Ödeme yaptım', style:{width:'auto'}});
+        payBtn.addEventListener('click', ()=>{ state.payPick = day.id; render(); });
+        payWrap.appendChild(payBtn);
       }
       card.appendChild(payWrap);
     }
@@ -1134,9 +1193,9 @@ function appendOrderRow(c, day, selections, teacherMap){
         el('div', {text: teacherMap[tid] || 'Bilinmeyen öğretmen', style:{fontWeight:'600', fontSize:'14px'}}),
         el('div', {text: optNames || 'Seçenek silinmiş', style:{fontSize:'12.5px', color:'var(--muted)'}})
       ]));
-      const payWrap = el('div', {style:{display:'flex', alignItems:'center', gap:'6px'}});
+      const payWrap = el('div', {style:{display:'flex', alignItems:'center', gap:'6px', flexWrap:'wrap'}});
       if(sel.paidConfirmed){
-        payWrap.appendChild(el('span', {text:'✓ Ödendi', style:{fontSize:'12.5px', color:'var(--success)', fontWeight:'700'}}));
+        payWrap.appendChild(el('span', {text:'✓ Ödendi' + payMethodSuffix(sel), style:{fontSize:'12.5px', color:'var(--success)', fontWeight:'700'}}));
         payWrap.appendChild(el('button', {class:'btn btn-outline btn-sm', text:'Geri al', on:{click: async ()=>{
           const fresh = await getSelections();
           const cur = normalizeSelection(fresh[day.id] && fresh[day.id][tid]);
@@ -1147,7 +1206,7 @@ function appendOrderRow(c, day, selections, teacherMap){
           render();
         }}}));
       } else if(sel.paidByTeacher){
-        payWrap.appendChild(el('span', {text:'Ödeme bildirildi', style:{fontSize:'12.5px', color:'var(--muted)'}}));
+        payWrap.appendChild(el('span', {text:'Ödeme bildirildi' + payMethodSuffix(sel), style:{fontSize:'12.5px', color:'var(--muted)', fontWeight:'600'}}));
         payWrap.appendChild(el('button', {class:'btn btn-gold btn-sm', text:'Onayla', on:{click: async ()=>{
           const fresh = await getSelections();
           const cur = normalizeSelection(fresh[day.id] && fresh[day.id][tid]);
@@ -1165,6 +1224,7 @@ function appendOrderRow(c, day, selections, teacherMap){
           cur.paidByTeacher = false;
           cur.paidConfirmed = false;
           cur.paymentRejected = true;
+          cur.paymentMethod = null;
           fresh[day.id][tid] = cur;
           await setSelections(fresh);
           render();
