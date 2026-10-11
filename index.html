@@ -203,6 +203,41 @@ function buildMethodPicker(onPick, onCancel){
   return wrap;
 }
 
+/* ---------- sipariş hedefi ---------- */
+const ORDER_TARGET = 5; // Bir günün siparişinin verilebilmesi için gereken en az sipariş sayısı
+
+// Bir günde, tüm öğretmenlerin seçimlerine göre ürün bazında ve toplam sayım
+function countDayOrders(day, selectionsRaw){
+  const perOption = {};
+  let total = 0;
+  const daySel = selectionsRaw[day.id] || {};
+  const fallback = day.options && day.options[0] && day.options[0].id;
+  Object.keys(daySel).forEach(tid=>{
+    const sel = normalizeSelection(daySel[tid], fallback);
+    if(!sel || !sel.optionIds) return;
+    sel.optionIds.forEach(id=>{
+      perOption[id] = (perOption[id]||0) + 1;
+      total++;
+    });
+  });
+  return { perOption, total };
+}
+// İlerleme çubuğu + "hedefe ulaşıldı mı" metni
+function buildTargetLine(count, label){
+  const reached = count >= ORDER_TARGET;
+  const pct = Math.min(100, Math.round(count / ORDER_TARGET * 100));
+  const wrap = el('div', {style:{marginTop:'5px'}});
+  const bar = el('div', {style:{height:'6px', background:'var(--card-line)', borderRadius:'6px', overflow:'hidden'}}, [
+    el('div', {style:{height:'100%', width: pct + '%', background: reached ? 'var(--success)' : 'var(--gold)'}})
+  ]);
+  const text = reached
+    ? '✓ Hedefe ulaşıldı (' + count + ' / ' + ORDER_TARGET + ') — sipariş verilecek'
+    : count + ' / ' + ORDER_TARGET + ' ' + (label || 'kişi') + ' — ' + (ORDER_TARGET - count) + ' tane daha gerekli';
+  wrap.appendChild(bar);
+  wrap.appendChild(el('div', {text, style:{fontSize:'12px', marginTop:'3px', fontWeight: reached ? '700' : '500', color: reached ? 'var(--success)' : 'var(--muted)'}}));
+  return wrap;
+}
+
 /* ---------- state ---------- */
 let state = {
   view: 'home',
@@ -756,6 +791,10 @@ async function viewTeacherPanel(){
  c.appendChild(buildPaymentSummary(menu, selectionsRaw, teacherId));
   c.appendChild(el('h2', {text:'Haftalık menü', style:{fontSize:'21px', marginBottom:'4px'}}));
   c.appendChild(el('p', {text:'Katılmak istediğiniz günleri ve seçeneği işaretleyin.', style:{color:'var(--muted)', fontSize:'14px', display:'block', marginBottom:'18px'}}));
+  c.appendChild(el('div', {style:{background:'var(--card-light)', border:'1px solid var(--gold)', borderRadius:'12px', padding:'12px 14px', marginBottom:'18px', fontSize:'13.5px', lineHeight:'1.5'}}, [
+    el('div', {text:'ℹ️ Sipariş hedefi: ' + ORDER_TARGET, style:{fontWeight:'700', marginBottom:'3px'}}),
+    el('div', {text:'Bir günün siparişinin kantine verilebilmesi için günlük toplam sipariş sayısının en az ' + ORDER_TARGET + ' olması gerekir. Menüdeki her ürünün altında kaç kişinin seçtiğini ve hedefe ulaşılıp ulaşılmadığını görebilirsiniz. Hedefe ulaşılmazsa o gün sipariş oluşturulmaz.', style:{color:'var(--muted)'}})
+  ]));
 
   if(rejectedDays.length > 0){
     const box = el('div', {class:'msg error'});
@@ -786,6 +825,7 @@ async function viewTeacherPanel(){
     const raw = selectionsRaw[day.id] && selectionsRaw[day.id][teacherId];
     const sel = normalizeSelection(raw, day.options && day.options[0] && day.options[0].id);
     const isSelected = !!(sel && sel.optionIds && sel.optionIds.length > 0);
+    const counts = countDayOrders(day, selectionsRaw);
     const card = el('div', {class:'day-card'});
     card.appendChild(el('div', {class:'dc-top'}, [
       el('div', {class:'dc-date', text: formatDateTR(day.date)})
@@ -820,9 +860,18 @@ async function viewTeacherPanel(){
         await setSelections(fresh);
         render();
       });
-      optWrap.appendChild(optBtn);
+      const optBox = el('div');
+      optBox.appendChild(optBtn);
+      optBox.appendChild(buildTargetLine(counts.perOption[opt.id] || 0, 'kişi seçti'));
+      optWrap.appendChild(optBox);
     });
     card.appendChild(optWrap);
+
+    // Günlük toplam
+    const dayLine = el('div', {style:{margin:'0 0 12px 0', padding:'10px 12px', background:'var(--cream)', borderRadius:'10px'}});
+    dayLine.appendChild(el('div', {text:'Günlük toplam sipariş', style:{fontWeight:'700', fontSize:'13.5px'}}));
+    dayLine.appendChild(buildTargetLine(counts.total, 'sipariş'));
+    card.appendChild(dayLine);
 
     if(isSelected){
       const total = sel.optionIds.reduce((sum, id)=>{
