@@ -826,8 +826,12 @@ async function viewTeacherPanel(){
     const counts = countDayOrders(day, selectionsRaw);
     const card = el('div', {class:'day-card'});
     card.appendChild(el('div', {class:'dc-top'}, [
-      el('div', {class:'dc-date', text: formatDateTR(day.date)})
+      el('div', {class:'dc-date', text: formatDateTR(day.date)}),
+      day.closed ? el('div', {text:'🔒 Sipariş kapalı', style:{fontSize:'12.5px', fontWeight:'700', color:'var(--danger)', whiteSpace:'nowrap'}}) : null
     ]));
+    if(day.closed){
+      card.appendChild(el('div', {class:'hint', text:'Kantinci bu gün için sipariş almıyor.', style:{display:'block', marginBottom:'8px', color:'var(--danger)'}}));
+    }
     card.appendChild(el('div', {class:'hint', text:'Birden fazla seçenek işaretleyebilirsiniz.', style:{display:'block', marginBottom:'8px'}}));
 
     const optWrap = el('div', {style:{display:'flex', flexDirection:'column', gap:'8px', marginBottom:'12px'}});
@@ -836,13 +840,22 @@ async function viewTeacherPanel(){
       const optBtn = el('button', {
         class:'toggle-btn' + (active ? ' active' : ''),
         style:{display:'flex', justifyContent:'space-between', textAlign:'left'},
-        attrs: (!cfg.ordersOpen ? {disabled:'disabled'} : {})
+        attrs: ((!cfg.ordersOpen || isOptionClosed(day, opt)) ? {disabled:'disabled'} : {})
       }, [
-        el('span', {text: (active ? '✓ ' : '') + opt.name}),
+        el('span', {text: (active ? '✓ ' : '') + opt.name + ((opt.closed && !day.closed) ? ' (kapalı)' : '')}),
         el('span', {text: formatPrice(opt.price)})
       ]);
       optBtn.addEventListener('click', async ()=>{
         if(!cfg.ordersOpen) return;
+        // Sayfa açıkken kantinci gün/ürün kapatmış olabilir: güncel menüyü kontrol et
+        const freshMenu = await getMenu();
+        const freshDay = freshMenu.find(d=>d.id===day.id);
+        const freshOpt = freshDay && (freshDay.options||[]).find(o=>o.id===opt.id);
+        if(!freshDay || !freshOpt || isOptionClosed(freshDay, freshOpt)){
+          alert('Kantinci bu gün/ürün için siparişi kapattı.');
+          render();
+          return;
+        }
         const fresh = await getSelections();
         if(!fresh[day.id]) fresh[day.id] = {};
         const curRaw = fresh[day.id][teacherId];
@@ -1489,6 +1502,29 @@ function buildExcelCard(){
   return card;
 }
 
+/* ---------- gün / ürün bazlı sipariş kapatma ---------- */
+// day.closed === true  -> o günün tüm siparişleri kapalı
+// opt.closed === true  -> o günün yalnızca o ürünü kapalı
+function isOptionClosed(day, opt){ return !!(day && day.closed) || !!(opt && opt.closed); }
+async function toggleDayClosed(dayId){
+  const fresh = await getMenu();
+  const d = fresh.find(x=>x.id===dayId);
+  if(!d) return;
+  d.closed = !d.closed;
+  await setMenu(fresh);
+  render();
+}
+async function toggleOptionClosed(dayId, optId){
+  const fresh = await getMenu();
+  const d = fresh.find(x=>x.id===dayId);
+  if(!d) return;
+  const o = (d.options||[]).find(x=>x.id===optId);
+  if(!o) return;
+  o.closed = !o.closed;
+  await setMenu(fresh);
+  render();
+}
+
 /* ---------- VIEW: canteen panel ---------- */
 async function viewCanteenPanel(){
   const c = el('div');
@@ -1535,14 +1571,32 @@ async function viewCanteenPanel(){
   upcoming.forEach(day=>{
     const card = el('div', {class:'day-card'});
     card.appendChild(el('div', {class:'dc-top'}, [
-      el('div', {class:'dc-date', text: formatDateTR(day.date)})
+      el('div', {class:'dc-date', text: formatDateTR(day.date)}),
+      day.closed ? el('div', {text:'🔒 Gün kapalı', style:{fontSize:'12.5px', fontWeight:'700', color:'var(--danger)', whiteSpace:'nowrap'}}) : null
     ]));
     const optList = el('div', {class:'dc-items'});
     (day.options||[]).forEach(opt=>{
-      optList.appendChild(el('div', {text: `• ${opt.name} — ${formatPrice(opt.price)}`}));
+      const optClosed = !!opt.closed;
+      const line = el('div', {style:{display:'flex', alignItems:'center', justifyContent:'space-between', gap:'8px', flexWrap:'wrap', padding:'3px 0'}});
+      line.appendChild(el('span', {
+        text: `• ${opt.name} — ${formatPrice(opt.price)}` + (optClosed ? '  (🔒 kapalı)' : ''),
+        style: (optClosed || day.closed) ? {opacity:'0.6'} : {}
+      }));
+      line.appendChild(el('button', {
+        class:'btn btn-sm ' + (optClosed ? 'btn-gold' : 'btn-outline'),
+        text: optClosed ? 'Siparişe aç' : 'Siparişi kapat',
+        style:{width:'auto', padding:'5px 10px', fontSize:'12.5px'},
+        on:{click: ()=> toggleOptionClosed(day.id, opt.id)}
+      }));
+      optList.appendChild(line);
     });
     card.appendChild(optList);
-    const actions = el('div', {class:'dc-admin-actions'});
+    const actions = el('div', {class:'dc-admin-actions', style:{flexWrap:'wrap'}});
+    actions.appendChild(el('button', {
+      class:'btn btn-sm ' + (day.closed ? 'btn-gold' : 'btn-dark'),
+      text: day.closed ? '🔓 Günü siparişe aç' : '🔒 Günün siparişini kapat',
+      on:{click: ()=> toggleDayClosed(day.id)}
+    }));
     actions.appendChild(el('button', {class:'btn btn-outline btn-sm', text:'Düzenle', on:{click:()=>{ state.modal={type:'editDay', dayId:day.id}; render(); }}}));
     actions.appendChild(el('button', {class:'btn btn-danger btn-sm', text:'Sil', on:{click: async ()=>{
       if(!confirm('Bu günü silmek istediğinize emin misiniz?')) return;
@@ -1775,7 +1829,12 @@ async function buildEditDayModal(dayId){
     if(filledRows.length === 0){ errBox.appendChild(el('div',{class:'msg error', text:'En az bir menü seçeneği girin.'})); return; }
     const invalidPrice = filledRows.some(r => r.priceInput.value === '' || isNaN(Number(r.priceInput.value)) || Number(r.priceInput.value) < 0);
     if(invalidPrice){ errBox.appendChild(el('div',{class:'msg error', text:'Her seçenek için geçerli bir fiyat girin.'})); return; }
-    const options = filledRows.map(r => ({ id: r.id, name: r.nameInput.value.trim(), price: Number(r.priceInput.value) }));
+    const options = filledRows.map(r => {
+      const prev = existing && (existing.options||[]).find(o=>o.id===r.id);
+      const o = { id: r.id, name: r.nameInput.value.trim(), price: Number(r.priceInput.value) };
+      if(prev && prev.closed) o.closed = true;
+      return o;
+    });
     const fresh = await getMenu();
     if(existing){
       const idx = fresh.findIndex(d=>d.id===existing.id);
